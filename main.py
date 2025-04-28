@@ -2,10 +2,11 @@ import requests
 import datetime
 import pytz
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+import json
 import os
+from oauth2client.service_account import ServiceAccountCredentials
 
-def disney_wait_logger(request):
+def disney_wait_logger():
     TOKYO_TZ = pytz.timezone('Asia/Tokyo')
     NOW = datetime.datetime.now(TOKYO_TZ)
     YEAR_MONTH = NOW.strftime('%Y-%m')
@@ -17,7 +18,12 @@ def disney_wait_logger(request):
 
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 
-    creds = ServiceAccountCredentials.from_json_keyfile_name('disneywaitlogger-dac8ce422390.json', scope)
+    # NEW: Load Google credentials from environment variable
+    creds_json = os.getenv('GOOGLE_APPLICATION_CREDENTIALS_JSON')
+    if creds_json is None:
+        raise Exception("Missing GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable.")
+    
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(creds_json), scope)
     client = gspread.authorize(creds)
 
     PARK_IDS = {
@@ -93,3 +99,6 @@ def disney_wait_logger(request):
     worksheet.update(wait_times, f'{column_letter}{start_row}:{column_letter}{end_row}')
 
     return f"✅ Updated {len(park_ride_rows)} rides at {NOW.strftime('%Y-%m-%d %H:%M:%S')} Tokyo time.", 200
+
+if __name__ == "__main__":
+    disney_wait_logger()
