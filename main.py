@@ -12,6 +12,10 @@ def disney_wait_logger():
     YEAR_MONTH = NOW.strftime('%Y-%m')
     DAY = NOW.strftime('%Y-%m-%d')
     HOUR = NOW.hour
+
+    # Skip updates outside of 8AM–11:45PM Tokyo time
+    if HOUR < 8 or HOUR > 23:
+        return '⏳ Outside Tokyo Disney hours. No update.', 200
     MINUTE = NOW.minute
 
     SHEET_NAME_TEMPLATE = f'TokyoDisneyWaitTimes-{YEAR_MONTH}'
