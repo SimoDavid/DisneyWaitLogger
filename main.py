@@ -44,7 +44,8 @@ def disney_wait_logger():
     try:
         worksheet = sheet.worksheet(DAY_TAB_NAME)
     except gspread.WorksheetNotFound:
-        worksheet = sheet.add_worksheet(title=DAY_TAB_NAME, rows="500", cols="100")
+        worksheet = sheet.add_worksheet(title=DAY_TAB_NAME, rows="500", cols="97")
+        worksheet.freeze(rows=1, cols=2)  # Freeze first row and two columns
         worksheet.update([['Park', 'Attraction Name']], 'A1:B1')
 
         # Create 15-min interval headers from 8:00 to 0:00 (64 columns)
