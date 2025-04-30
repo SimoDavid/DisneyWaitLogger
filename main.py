@@ -12,13 +12,13 @@ def disney_wait_logger():
     YEAR_MONTH = NOW.strftime('%Y-%m')
     DAY = NOW.strftime('%Y-%m-%d')
     HOUR = NOW.hour
+    MINUTE = NOW.minute
 
     SHEET_NAME_TEMPLATE = f'TokyoDisneyWaitTimes-{YEAR_MONTH}'
     DAY_TAB_NAME = DAY
 
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 
-    # NEW: Load Google credentials from environment variable
     creds_json = os.getenv('GOOGLE_APPLICATION_CREDENTIALS_JSON')
     if creds_json is None:
         raise Exception("Missing GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable.")
@@ -40,16 +40,20 @@ def disney_wait_logger():
     try:
         worksheet = sheet.worksheet(DAY_TAB_NAME)
     except gspread.WorksheetNotFound:
-        worksheet = sheet.add_worksheet(title=DAY_TAB_NAME, rows="500", cols="21")
+        worksheet = sheet.add_worksheet(title=DAY_TAB_NAME, rows="500", cols="100")
         worksheet.update([['Park', 'Attraction Name']], 'A1:B1')
 
-    worksheet.update([[
-        '8AM', '9AM', '10AM', '11AM', '12PM', '1PM', '2PM', '3PM', '4PM', '5PM', '6PM', '7PM', '8PM', '9PM', '10PM', '11PM', '12AM'
-    ]], 'C1:S1')
+        # Create 15-min interval headers from 8:00 to 0:00 (64 columns)
+        headers = []
+        for h in range(8, 24):
+            for m in [0, 15, 30, 45]:
+                label = datetime.time(h, m).strftime('%-I:%M%p').lower().replace(':00', '')
+                headers.append(label)
+        worksheet.update([headers], 'C1:' + chr(ord('C') + len(headers) - 1) + '1')
 
     LIVE_URLS = [
         'https://api.themeparks.wiki/v1/entity/faff60df-c766-4470-8adb-dee78e813f42/live',
-        'https://api.themeparks.wiki/v1/entity/7340550e-c14d-4213-8b8c-5b5b987f973e/live'
+        'https://api.themeparks.wiki/v1/entity/7340550e-c14d-4213-8c3f-5b5b987f973e/live'
     ]
 
     all_attractions = []
@@ -74,27 +78,26 @@ def disney_wait_logger():
                     })
 
     all_attractions_sorted = sorted(all_attractions, key=lambda x: (x['park'], x['name']))
-
     park_ride_rows = [[a['park'], a['name']] for a in all_attractions_sorted]
 
     start_row = 2
     end_row = start_row + len(park_ride_rows) - 1
     worksheet.update(park_ride_rows, f'A{start_row}:B{end_row}')
 
-    column_offset = HOUR - 8
-    if column_offset < 0 or column_offset > 16:
-        return 'Outside of Tokyo Disney opening hours. No update made.', 200
+    # Calculate 15-minute slot index (0 = 8:00AM, 1 = 8:15AM, ..., 63 = 11:45PM)
+    if HOUR < 8 or HOUR >= 24:
+        return 'Outside of Tokyo Disney logging window.', 200
 
-    column_letter = chr(ord('C') + column_offset)
+    quarter_hour_index = (HOUR - 8) * 4 + (MINUTE // 15)
+    if quarter_hour_index < 0 or quarter_hour_index >= 64:
+        return 'Outside of scheduled logging intervals.', 200
 
+    column_letter = chr(ord('C') + quarter_hour_index)
     wait_times = []
 
     for attraction in all_attractions_sorted:
         wait_time = attraction['waitTime']
-        if wait_time == 0 or wait_time is None:
-            wait_times.append([''])
-        else:
-            wait_times.append([wait_time])
+        wait_times.append(['' if wait_time in [None, 0] else wait_time])
 
     worksheet.update(wait_times, f'{column_letter}{start_row}:{column_letter}{end_row}')
 
