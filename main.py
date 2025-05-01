@@ -6,27 +6,31 @@ import json
 import os
 from oauth2client.service_account import ServiceAccountCredentials
 
-def get_column_letter(n):
-    result = ''
-    while n > 0:
-        n, remainder = divmod(n - 1, 26)
-        result = chr(65 + remainder) + result
-    return result
-
 def disney_wait_logger():
     TOKYO_TZ = pytz.timezone('Asia/Tokyo')
-    now = datetime.datetime.now(TOKYO_TZ)
-    year_month = now.strftime('%Y-%m')
-    day = now.strftime('%Y-%m-%d')
+    NOW = datetime.datetime.now(TOKYO_TZ)
+    YEAR_MONTH = NOW.strftime('%Y-%m')
+    DAY = NOW.strftime('%Y-%m-%d')
+    HOUR = NOW.hour
+    MINUTE = NOW.minute
 
-    sheet_name = f'TokyoDisneyWaitTimes-{year_month}'
-    tab_name = day
+    SHEET_NAME_TEMPLATE = f'TokyoDisneyWaitTimes-{YEAR_MONTH}'
+    DAY_TAB_NAME = DAY
+
+    # 15-minute column headers (8:00 to 23:45)
+    headers = ['Park', 'Attraction Name']
+    time_slots = [
+        f"{hour}:{minute:02d}" for hour in range(8, 24)
+        for minute in range(0, 60, 15)
+    ]
+    headers.extend(time_slots)
 
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+
     creds_json = os.getenv('GOOGLE_APPLICATION_CREDENTIALS_JSON')
     if creds_json is None:
         raise Exception("Missing GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable.")
-
+    
     creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(creds_json), scope)
     client = gspread.authorize(creds)
 
@@ -36,44 +40,40 @@ def disney_wait_logger():
     }
 
     try:
-        sheet = client.open(sheet_name)
+        sheet = client.open(SHEET_NAME_TEMPLATE)
     except gspread.SpreadsheetNotFound:
-        sheet = client.create(sheet_name)
-    sheet.share('davidsimpson716@gmail.com', perm_type='user', role='writer')
+        sheet = client.create(SHEET_NAME_TEMPLATE)
+        sheet.share('davidsimpson716@gmail.com', perm_type='user', role='writer')
 
     try:
-        worksheet = sheet.worksheet(tab_name)
+        worksheet = sheet.worksheet(DAY_TAB_NAME)
     except gspread.WorksheetNotFound:
-        worksheet = sheet.add_worksheet(title=tab_name, rows="500", cols="100")
-        worksheet.update('A1:B1', [['Park', 'Attraction Name']])
-        
-        # 64 time slots from 8:00 AM to midnight in 15-minute increments
-        time_headers = [(datetime.datetime(2000, 1, 1, 8) + datetime.timedelta(minutes=15*i)).strftime('%-I:%M %p') for i in range(64)]
-        worksheet.update(f'C1:{get_column_letter(2 + len(time_headers))}1', [time_headers])
+        worksheet = sheet.add_worksheet(title=DAY_TAB_NAME, rows="500", cols=str(len(headers)))
+        worksheet.update('A1', [headers])  # Write header row
 
-        # Freeze headers
-        sheet.batch_update({
-            "requests": [{
-                "updateSheetProperties": {
-                    "properties": {
-                        "sheetId": worksheet._properties['sheetId'],
-                        "gridProperties": {
-                            "frozenRowCount": 1,
-                            "frozenColumnCount": 2
-                        }
-                    },
-                    "fields": "gridProperties.frozenRowCount,gridProperties.frozenColumnCount"
+        # Lock the first row and first two columns
+        sheet_batch = sheet.spreadsheet.batch_update({
+            "requests": [
+                {
+                    "updateSheetProperties": {
+                        "properties": {
+                            "sheetId": worksheet._properties['sheetId'],
+                            "gridProperties": {
+                                "frozenRowCount": 1,
+                                "frozenColumnCount": 2
+                            }
+                        },
+                        "fields": "gridProperties.frozenRowCount,gridProperties.frozenColumnCount"
+                    }
                 }
-            }]
+            ]
         })
 
-        # Style header row: red, bold, centered
+        # Format the first row: bold, red, centered
         worksheet.format("1:1", {
-            "textFormat": {
-                "bold": True,
-                "foregroundColor": {"red": 1.0, "green": 0.0, "blue": 0.0}
-            },
-            "horizontalAlignment": "CENTER"
+            "textFormat": {"bold": True},
+            "horizontalAlignment": "CENTER",
+            "backgroundColor": {"red": 1.0, "green": 0.8, "blue": 0.8}
         })
 
     LIVE_URLS = [
@@ -91,7 +91,11 @@ def disney_wait_logger():
                 for ride in park_data['liveData']:
                     park_id = ride.get('parkId')
                     park_name = PARK_IDS.get(park_id, "Unknown Park")
-                    wait_time = ride.get('queue', {}).get('STANDBY', {}).get('waitTime', '')
+
+                    wait_time = ''
+                    if ride.get('queue') and ride['queue'].get('STANDBY'):
+                        wait_time = ride['queue']['STANDBY'].get('waitTime')
+
                     all_attractions.append({
                         'park': park_name,
                         'name': ride.get('name'),
@@ -99,24 +103,32 @@ def disney_wait_logger():
                     })
 
     all_attractions_sorted = sorted(all_attractions, key=lambda x: (x['park'], x['name']))
-    ride_rows = [[a['park'], a['name']] for a in all_attractions_sorted]
+    park_ride_rows = [[a['park'], a['name']] for a in all_attractions_sorted]
 
     start_row = 2
-    end_row = start_row + len(ride_rows) - 1
-    worksheet.update(f'A{start_row}:B{end_row}', ride_rows)
+    end_row = start_row + len(park_ride_rows) - 1
 
-    # Calculate current column (15-minute blocks starting from 8:00 AM JST)
-    minutes_since_open = (now.hour * 60 + now.minute) - (8 * 60)
-    if minutes_since_open < 0 or minutes_since_open >= 960:
-        return '⏱️ Outside Tokyo Disney hours. No update.', 200
+    worksheet.update(f'A{start_row}:B{end_row}', park_ride_rows)
 
-    column_index = 3 + minutes_since_open // 15  # column C is index 3
-    column_letter = get_column_letter(column_index)
+    # Guard clause: exit if outside park hours (before 8AM or after 11:59PM Tokyo time)
+    if HOUR < 8 or HOUR >= 24:
+        return 'Outside of Tokyo Disney opening hours. No update made.', 200
 
-    wait_times = [[a['waitTime'] if a['waitTime'] else ''] for a in all_attractions_sorted]
+    # Compute column for current 15-minute slot
+    total_minutes = (HOUR - 8) * 60 + MINUTE
+    column_index = 2 + (total_minutes // 15)  # Offset by 2 for A+B columns
+    column_letter = chr(ord('A') + (column_index % 26))
+    if column_index >= 26:
+        column_letter = chr(ord('A') + ((column_index - 26) // 26)) + column_letter
+
+    wait_times = []
+    for attraction in all_attractions_sorted:
+        wait_time = attraction['waitTime']
+        wait_times.append(['' if wait_time in (0, None) else wait_time])
+
     worksheet.update(f'{column_letter}{start_row}:{column_letter}{end_row}', wait_times)
 
-    return f"✅ Updated {len(ride_rows)} rides at {now.strftime('%Y-%m-%d %H:%M:%S')} JST.", 200
+    return f"✅ Updated {len(park_ride_rows)} rides at {NOW.strftime('%Y-%m-%d %H:%M:%S')} Tokyo time.", 200
 
 if __name__ == "__main__":
     disney_wait_logger()
