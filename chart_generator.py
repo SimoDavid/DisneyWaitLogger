@@ -1,141 +1,144 @@
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-from pydrive.auth import GoogleAuth
-from pydrive.drive import GoogleDrive
-import matplotlib.pyplot as plt
-import matplotlib.image as mpimg
-from matplotlib.offsetbox import OffsetImage, AnnotationBbox
-import datetime
-import calendar
-import numpy as np
 import os
 import json
-import io
+import datetime
+import calendar
+import gspread
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+import numpy as np
 import requests
+from oauth2client.service_account import ServiceAccountCredentials
+from matplotlib.offsetbox import OffsetImage, AnnotationBbox
+from pydrive.auth import GoogleAuth
+from pydrive.drive import GoogleDrive
+from github import Github
+import io
 
-# Configuration
-BANNER_URL = "https://raw.githubusercontent.com/SimoDavid/DisneyWaitLogger/refs/heads/main/banner.jpg"
-DRIVE_FOLDER_ID = "1VS6rc5vVsi_yHY1td-1TmUBeY4gdboq8"
-MONTHLY_SUBFOLDER_NAME = "monthly"
-CREDENTIALS_FILE = "disneywaitlogger-dac8ce422390.json"
+# Constants
+BANNER_URL = 'https://raw.githubusercontent.com/SimoDavid/DisneyWaitLogger/refs/heads/main/banner.jpg'
+GITHUB_REPO_NAME = 'SimoDavid/DisneyWaitLogger'
+GITHUB_CHARTS_PATH = 'charts/monthly'
 
 # Date info
-now = datetime.datetime.now()
-year = now.year
-month = now.month
-today = now.day
-last_day = calendar.monthrange(year, month)[1]
-SPREADSHEET_NAME = f"TokyoDisneyWaitTimes-{year}-{month:02d}"
-output_filename = f"{year}_{month:02d} monthly_wait_chart.png"
-title_str = f"Top 10 Rides by Average Wait Time for the Month of {now.strftime('%B')} {year}"
+today = datetime.date.today()
+year = today.year
+month = today.month
+spreadsheet_name = f"TokyoDisneyWaitTimes-{year}-{str(month).zfill(2)}"
+days_in_month = calendar.monthrange(year, month)[1]
+output_filename = f"{year}_{str(month).zfill(2)} monthly_wait_chart.png"
 
-# Auth credentials
+# Authorize Google Sheets
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-env_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
-if env_json:
-    credentials_dict = json.loads(env_json)
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(credentials_dict, scope)
+if os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"):
+    creds_json = json.loads(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
 else:
-    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
+    creds = ServiceAccountCredentials.from_json_keyfile_name("disneywaitlogger-dac8ce422390.json", scope)
+
 client = gspread.authorize(creds)
+sheet = client.open(spreadsheet_name)
 
-# Load spreadsheet
-spreadsheet = client.open(SPREADSHEET_NAME)
-
-# Collect ride data
-ride_data = {}
-all_days = list(range(1, last_day + 1))
-
-for day in range(1, today):
-    tab_name = f"{year}-{month:02d}-{day:02d}"
+# Accumulate wait times per ride
+ride_waits = {}
+for day in range(1, today.day):
+    tab_name = f"{year}-{str(month).zfill(2)}-{str(day).zfill(2)}"
     try:
-        worksheet = spreadsheet.worksheet(tab_name)
+        worksheet = sheet.worksheet(tab_name)
         data = worksheet.get_all_values()
-    except gspread.exceptions.WorksheetNotFound:
+        for row in data[1:]:
+            ride_name = row[1]
+            wait_times = [int(t) if t.isdigit() else np.nan for t in row[2:]]
+            if ride_name not in ride_waits:
+                ride_waits[ride_name] = [np.nan] * days_in_month
+            ride_waits[ride_name][day - 1] = np.nanmean(wait_times)
+    except:
         continue
 
-    for row in data[1:]:
-        if len(row) < 3:
-            continue
-        ride_name = row[1]
-        wait_times = [int(x) if x.strip().isdigit() else np.nan for x in row[2:]]
-        if ride_name not in ride_data:
-            ride_data[ride_name] = [[] for _ in all_days]
-        ride_data[ride_name][day - 1] = wait_times
+# Calculate average wait times
+averages = {
+    name: np.nanmean(waits)
+    for name, waits in ride_waits.items()
+    if any(not np.isnan(w) for w in waits)
+}
 
-# Compute averages
-ride_averages = {}
-for ride, waits_per_day in ride_data.items():
-    daily_averages = []
-    for waits in waits_per_day:
-        avg = np.nanmean(waits) if waits else np.nan
-        daily_averages.append(avg)
-    overall_avg = np.nanmean([val for val in daily_averages if not np.isnan(val)])
-    ride_averages[ride] = (overall_avg, daily_averages)
+top10 = sorted(averages.items(), key=lambda x: x[1], reverse=True)[:10]
 
-# Top 10 rides
-top_rides = sorted(ride_averages.items(), key=lambda x: (np.nan_to_num(x[1][0], nan=0)), reverse=True)[:10]
+# Plotting
+fig, ax = plt.subplots(figsize=(18, 10))
+x = list(range(1, days_in_month + 1))
+for ride_name, _ in top10:
+    y = ride_waits.get(ride_name, [np.nan] * days_in_month)
+    if np.all(np.isnan(y)):
+        continue
+    avg = np.nanmean(y)
+    label = f"{ride_name} ({int(round(avg))})" if not np.isnan(avg) else ride_name
+    ax.plot(x, y, label=label)
 
-# Plot
-x = list(range(1, last_day + 1))
-x_labels = [f"{calendar.day_name[datetime.date(year, month, d).weekday()]} {d}" for d in x]
-plt.figure(figsize=(18, 9))
+# X-axis formatting
+x_labels = [
+    datetime.date(year, month, day).strftime('%A %-d')
+    for day in x
+]
+ax.set_xticks(x)
+ax.set_xticklabels(x_labels, rotation=45)
+ax.set_xlabel("Day of Month")
+ax.set_ylabel("Wait Time (minutes)")
+ax.set_title(f"Top 10 Rides by Average Wait Time for the Month of {today.strftime('%B %Y')}")
 
-for ride, (avg, daily_avgs) in top_rides:
-    if all(np.isnan(val) for val in daily_avgs):
-        continue  # Skip rides with no data at all
-    safe_avg = int(round(avg)) if not np.isnan(avg) else 0
-    label = f"{ride} ({safe_avg})"
-    padded = daily_avgs[:last_day] + [np.nan] * (last_day - len(daily_avgs))
-    plt.plot(x, padded, label=label)
-
-plt.title(title_str)
-plt.xlabel("Day of Month")
-plt.ylabel("Wait Time (mins)")
-plt.xticks(ticks=x, labels=x_labels, rotation=45, ha='right')
-plt.legend(loc='center left', bbox_to_anchor=(1.01, 0.3))
-
-# Add banner
+# Banner graphic
 response = requests.get(BANNER_URL)
 if response.status_code == 200:
-    banner_img = mpimg.imread(io.BytesIO(response.content), format='JPG')
+    banner_img = mpimg.imread(io.BytesIO(response.content), format='jpg')
     imagebox = OffsetImage(banner_img, zoom=0.15)
-    ab = AnnotationBbox(imagebox, (1.15, 1.02), xycoords='axes fraction', frameon=False)
-    plt.gca().add_artist(ab)
+    ab = AnnotationBbox(imagebox, (0.95, 0.95), frameon=False, xycoords='axes fraction')
+    ax.add_artist(ab)
 
+# Legend and save
+plt.legend(loc='lower right', bbox_to_anchor=(1.25, 0))
 plt.tight_layout()
-plt.savefig(output_filename, bbox_inches="tight")
+plt.savefig(output_filename)
 plt.close()
+print(f"✅ Chart saved as {output_filename}")
 
-# Upload to Drive
+# Upload to Google Drive
 gauth = GoogleAuth()
 gauth.credentials = creds
 drive = GoogleDrive(gauth)
 
-file_list = drive.ListFile({'q': f"'{DRIVE_FOLDER_ID}' in parents and trashed=false"}).GetList()
-monthly_folder_id = None
-for f in file_list:
-    if f['title'].lower() == MONTHLY_SUBFOLDER_NAME and f['mimeType'] == 'application/vnd.google-apps.folder':
-        monthly_folder_id = f['id']
-        break
+folder_list = drive.ListFile({'q': "'root' in parents and trashed=false"}).GetList()
+disney_folder = next((f for f in folder_list if f['title'] == 'disneywaittimes'), None)
 
-if not monthly_folder_id:
-    raise Exception("❌ Could not find 'monthly' folder in Google Drive.")
+if disney_folder:
+    subfolders = drive.ListFile({'q': f"'{disney_folder['id']}' in parents and trashed=false"}).GetList()
+    monthly_folder = next((f for f in subfolders if f['title'] == 'monthly'), None)
 
-existing_files = drive.ListFile({
-    'q': f"'{monthly_folder_id}' in parents and trashed=false"
-}).GetList()
+    if monthly_folder:
+        existing_files = drive.ListFile({'q': f"'{monthly_folder['id']}' in parents and trashed=false"}).GetList()
+        for f in existing_files:
+            if f['title'] == output_filename:
+                f.Delete()
 
-for f in existing_files:
-    if f['title'] == output_filename:
-        f.Delete()
-        break
+        upload_file = drive.CreateFile({'title': output_filename, 'parents': [{'id': monthly_folder['id']}]})
+        upload_file.SetContentFile(output_filename)
+        upload_file.Upload()
+        print("📤 Uploaded to Google Drive.")
 
-uploaded_file = drive.CreateFile({'title': output_filename, 'parents': [{'id': monthly_folder_id}]})
-uploaded_file.SetContentFile(output_filename)
-uploaded_file.Upload()
-uploaded_file.InsertPermission({'type': 'anyone', 'value': 'anyone', 'role': 'reader'})
+# Upload to GitHub
+github_token = os.getenv("GITHUB_TOKEN")
+if github_token:
+    gh = Github(github_token)
+    repo = gh.get_repo(GITHUB_REPO_NAME)
 
-embed_url = f"https://drive.google.com/uc?export=view&id={uploaded_file['id']}"
-print(f"✅ Monthly chart uploaded: {output_filename}")
-print(f"🔗 Embed URL: {embed_url}")
+    with open(output_filename, "rb") as f:
+        content = f.read()
+
+    path = f"{GITHUB_CHARTS_PATH}/{output_filename}"
+    try:
+        existing_file = repo.get_contents(path)
+        repo.update_file(existing_file.path, f"Update {output_filename}", content, existing_file.sha, branch="main")
+        print("✅ GitHub file updated.")
+    except:
+        repo.create_file(path, f"Add {output_filename}", content, branch="main")
+        print("✅ GitHub file created.")
+else:
+    print("⚠️ GITHUB_TOKEN not found. Skipping GitHub upload.")
