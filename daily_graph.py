@@ -12,42 +12,36 @@ from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 from pydrive.auth import GoogleAuth
 from pydrive.drive import GoogleDrive
 from github import Github
+import io
 
 # Constants
-SPREADSHEET_NAME = 'TokyoDisneyWaitTimes-2025-05'
 BANNER_URL = 'https://raw.githubusercontent.com/SimoDavid/DisneyWaitLogger/refs/heads/main/banner.jpg'
-GOOGLE_DAILY_FOLDER_ID = '1eDNTznhWvhPWmYtWsfZ2T2T12kEYb_tB'  # /disneywaittimes/daily
 GITHUB_REPO_NAME = 'SimoDavid/DisneyWaitLogger'
 GITHUB_CHARTS_PATH = 'charts/daily'
 
-# Date Setup (yesterday, Tokyo time)
+# Date Setup
 tokyo_tz = pytz.timezone('Asia/Tokyo')
 today_tokyo = datetime.datetime.now(tokyo_tz).date()
 target_date = today_tokyo - datetime.timedelta(days=1)
 tab_name = target_date.strftime('%Y-%m-%d')
-chart_title_date = target_date.strftime('%A %d %B %Y')
+chart_title_date = target_date.strftime('%A %-d %B %Y')
 filename = f"{tab_name} wait times.png"
+spreadsheet_name = f"TokyoDisneyWaitTimes-{target_date.strftime('%Y-%m')}"
 
-# Authorize Google Sheets
+# Google Sheets Credentials
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 if os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"):
-    credentials_dict = json.loads(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(
-        credentials_dict, ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    )
+    creds_json = json.loads(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
 else:
-    creds = ServiceAccountCredentials.from_json_keyfile_name(
-        'disneywaitlogger-dac8ce422390.json',
-        ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    )
+    creds = ServiceAccountCredentials.from_json_keyfile_name("disneywaitlogger-dac8ce422390.json", scope)
 
 client = gspread.authorize(creds)
-
-# Load worksheet
-worksheet = client.open(SPREADSHEET_NAME).worksheet(tab_name)
+worksheet = client.open(spreadsheet_name).worksheet(tab_name)
 data = worksheet.get_all_values()
+
 headers = data[0][2:]
 ride_rows = data[1:]
-
 ride_averages = []
 ride_waits = {}
 
@@ -59,7 +53,6 @@ for row in ride_rows:
     avg = np.nanmean(wait_times)
     ride_averages.append((name, avg))
 
-# Select top 10
 top10 = sorted(ride_averages, key=lambda x: x[1], reverse=True)[:10]
 
 # Graph
@@ -69,17 +62,21 @@ x_indices = np.arange(len(x_ticks))
 
 for name, _ in top10:
     y = ride_waits[name][:len(x_indices)]
-    plt.plot(x_indices, y, label=f"{name} ({int(np.nanmean(y))})")
+    if np.all(np.isnan(y)):
+        continue
+    avg_wait = np.nanmean(y)
+    avg_label = "?" if np.isnan(avg_wait) else int(round(avg_wait))
+    plt.plot(x_indices, y, label=f"{name} ({avg_label})")
 
 plt.xticks(x_indices, x_ticks, rotation=45)
 plt.xlabel("Time of Day")
 plt.ylabel("Wait Time (minutes)")
 plt.title(f"Top 10 Rides by Average Wait Time for {chart_title_date}")
-plt.legend(loc='lower right')
+plt.legend(loc='lower right', bbox_to_anchor=(1.25, 0))
 
 # Banner
 response = requests.get(BANNER_URL)
-img = mpimg.imread(requests.get(BANNER_URL, stream=True).raw, format='jpg')
+img = mpimg.imread(io.BytesIO(response.content), format='jpg')
 imagebox = OffsetImage(img, zoom=0.15)
 ab = AnnotationBbox(imagebox, (0.95, 0.95), frameon=False, xycoords='axes fraction')
 plt.gca().add_artist(ab)
@@ -92,20 +89,26 @@ print(f"✅ Chart saved as {filename}")
 
 # Upload to Google Drive
 gauth = GoogleAuth()
-gauth.LocalWebserverAuth()
+gauth.credentials = creds
 drive = GoogleDrive(gauth)
 
-# Remove existing file (if any)
-existing_files = drive.ListFile({
-    'q': f"'{GOOGLE_DAILY_FOLDER_ID}' in parents and title='{filename}' and trashed=false"
-}).GetList()
-for f in existing_files:
-    f.Delete()
+folder_list = drive.ListFile({'q': "'root' in parents and trashed=false"}).GetList()
+disney_folder = next((f for f in folder_list if f['title'] == 'disneywaittimes'), None)
 
-upload_file = drive.CreateFile({'title': filename, 'parents': [{'id': GOOGLE_DAILY_FOLDER_ID}]})
-upload_file.SetContentFile(filename)
-upload_file.Upload()
-print("📤 Uploaded to Google Drive.")
+if disney_folder:
+    subfolders = drive.ListFile({'q': f"'{disney_folder['id']}' in parents and trashed=false"}).GetList()
+    daily_folder = next((f for f in subfolders if f['title'] == 'daily'), None)
+
+    if daily_folder:
+        existing_files = drive.ListFile({'q': f"'{daily_folder['id']}' in parents and trashed=false"}).GetList()
+        for f in existing_files:
+            if f['title'] == filename:
+                f.Delete()
+
+        upload_file = drive.CreateFile({'title': filename, 'parents': [{'id': daily_folder['id']}]})
+        upload_file.SetContentFile(filename)
+        upload_file.Upload()
+        print("📤 Uploaded to Google Drive.")
 
 # Upload to GitHub
 github_token = os.getenv("GITHUB_TOKEN")
